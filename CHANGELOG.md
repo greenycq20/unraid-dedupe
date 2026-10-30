@@ -2,6 +2,24 @@
 
 All notable changes to the Dedupe plugin will be documented in this file.
 
+## [2026.10.31] — 2026-10-31
+
+### Added
+- **Smart "Keep" Selection**:
+  - Keep Oldest (preserves earliest modified file, marks newer copies for deletion)
+  - Keep Newest (preserves most recently modified file)
+  - Keep Shortest Path (preserves cleanest/shortest path)
+  - Keep by Preferred Path Pattern (prioritize keeping files in specific shares/directories like `/mnt/user/media/`)
+- **File Extension Filters**:
+  - Include specific extensions (e.g. `mkv, mp4, avi, iso`)
+  - Exclude specific extensions (e.g. `nfo, srt, txt, part, tmp`)
+- **CSV Report Export**: One-click download of the entire duplicate audit report as a CSV spreadsheet.
+- **Automated Scheduled Scans**: Configure Daily, Weekly, or Monthly background scans via Unraid cron with native notification alerts.
+- **Enhanced Deletion Confirmation**: Interactive modal showing file count, space to reclaim, and a preview of files targeted for removal.
+- **File Modification Dates**: Duplicate results table now displays formatted timestamps for each file.
+- **Log Rotation**: Automatic truncation when logs exceed 1 MB to prevent memory exhaustion on `/tmp`.
+- **Persistent Settings**: Plugin settings preserved across server reboots in `/boot/config/plugins/dedupe/dedupe.cfg`.
+
 ## [2026.10.30] — 2026-10-30
 
 ### Security

@@ -46,20 +46,22 @@ flowchart TD
 
 ---
 
-### ⏳ Phase 4: Polish & Advanced Features (Current Work)
+### ✅ Phase 4: Polish & Advanced Features (Completed in v2026.10.31)
 
-- [ ] **#12 File Extension Filters**: Scan only specific types (e.g. `*.mkv, *.mp4` or `*.iso`) or exclude specific extensions (`*.nfo`, `*.srt`).
-- [ ] **#15 Smart "Keep" Selection**:
+- [x] **#12 File Extension Filters**: Include (`mkv, mp4, iso`) and Exclude (`nfo, srt, tmp`) extensions.
+- [x] **#15 Smart "Keep" Selection**:
   - Keep Oldest (by modification date `mtime`)
   - Keep Newest
-  - Keep by Preferred Path/Disk (e.g. keep cache or specific share, mark array/download copy for deletion)
+  - Keep by Preferred Path/Disk Pattern (e.g. prioritize keeping `/media/` over `/downloads/`)
   - Keep Shortest Path
-- [ ] **#16 Enhanced Delete Confirmation & Safety**:
-  - Detailed modal listing exact files & directories about to be deleted
-  - Optional "Dry Run" mode
-- [ ] **#17 Log Management & Size Limits**:
-  - Bounded log file size / rotation to prevent `/tmp` RAM exhaustion.
-- [ ] **#18 Scheduled Scans (Cron)**:
-  - Weekly / Monthly automated duplicate scans with background Unraid notification alerts.
-- [ ] **#22 Polling Optimization**:
-  - Smarter polling backoff to reduce idle server requests.
+- [x] **#16 Enhanced Delete Confirmation & Safety**:
+  - Detailed confirmation with preview of files targeted for deletion and exact reclaimable bytes.
+- [x] **#17 Log Management & Size Limits**:
+  - Log rotation caps `/tmp/dedupe_scan.log` at 1 MB / last 1000 lines.
+- [x] **#18 Scheduled Scans (Cron)**:
+  - Daily, Weekly, or Monthly automated scans via `/etc/cron.d/` with notification summaries.
+- [x] **CSV Report Export**:
+  - Direct export of all duplicate groups and paths into spreadsheet-compatible format.
+- [x] **Configuration Persistence**:
+  - Settings stored on flash drive at `/boot/config/plugins/dedupe/dedupe.cfg`.
+
