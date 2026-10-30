@@ -2,6 +2,15 @@
 
 All notable changes to the Dedupe plugin will be documented in this file.
 
+## [2026.10.31a] — 2026-10-31
+
+### Fixed
+- Fixed scanner hang at "Initializing..." caused by `set -euo pipefail` terminating on non-critical errors.
+- Fixed FUSE mount path validation in `api.php`.
+- Redirected scanner stderr directly into `/tmp/dedupe_scan.log` for immediate visibility.
+- Removed brittle `eval` in file search, ensuring paths with spaces/symbols are handled cleanly.
+- Added immediate error notifications to the UI if a scan fails to start.
+
 ## [2026.10.31] — 2026-10-31
 
 ### Added

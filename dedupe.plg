@@ -2,12 +2,19 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name "dedupe">
 <!ENTITY author "James Green">
-<!ENTITY version "2026.10.31">
+<!ENTITY version "2026.10.31a">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/greenycq20/unraid-dedupe/main/dedupe.plg">
 ]>
 <PLUGIN name="&name;" author="&author;" version="&version;" pluginURL="&pluginURL;" min="6.9.0" icon="clone">
 
 <CHANGES>
+###2026.10.31a
+- FIX: Fixed issue where scanner could hang at "Initializing..." due to over-strict bash pipefail and realpath resolution on FUSE mounts.
+- FIX: Scanner stderr is now routed directly into the log file for full visibility and debugging.
+- FIX: Added strict response validation to UI startScan() — surface backend validation errors immediately.
+- FIX: Removed brittle 'eval' from find pipeline; handles file paths with special characters and spaces reliably.
+- FIX: Scanner now gracefully handles unreadable/locked files without aborting the entire scan.
+
 ###2026.10.31
 - FEATURE: Added Smart "Keep" Selection strategies:
   * Keep Oldest (preserves earliest modified file, marks newer copies for deletion)
@@ -256,6 +263,7 @@ if (file_exists($cfgFile)) {
     let pollInterval = null;
     let logInterval = null;
     let currentDuplicates = [];
+    let isScanning = false;
 
     function toggleLogs() { $('#logBox').slideToggle(); }
     
@@ -280,12 +288,14 @@ if (file_exists($cfgFile)) {
     }
 
     function escapeHtml(str) {
+        if (!str) return '';
         var div = document.createElement('div');
         div.appendChild(document.createTextNode(str));
         return div.innerHTML;
     }
 
     function resetButtons() {
+        isScanning = false;
         $('#btnScan').show().prop('disabled', false).val('Start Scan');
         $('#btnPause, #btnResume, #btnCancel').hide();
     }
@@ -309,16 +319,20 @@ if (file_exists($cfgFile)) {
 
     function startScan() {
         var target = $('#targetPath').val();
-        if (target.indexOf('/mnt/') !== 0) { alert("Path must start with /mnt/"); return; }
+        if (!target || target.indexOf('/mnt/') !== 0) {
+            alert("Invalid target path. It must start with /mnt/");
+            return;
+        }
 
         $('#btnScan').hide();
         $('#btnPause, #btnCancel').show();
         $('#resultsArea').hide();
-        $('#statusArea').html('<i class="fa fa-spinner fa-spin"></i> Initializing...');
+        $('#statusArea').html('<i class="fa fa-spinner fa-spin"></i> Initializing scan...');
         $('#progressContainer').show();
         $('#progressBar').css('width', '0%');
         $('#progressText').text('0%');
-        $('#logBox').val('Scan started...\n');
+        $('#logBox').val('Scan initiated...\n');
+        isScanning = true;
 
         stopPolling();
         logInterval = setInterval(fetchLogs, 1000);
@@ -332,11 +346,26 @@ if (file_exists($cfgFile)) {
             includeExt: $('#includeExt').val(),
             excludeExt: $('#excludeExt').val(),
             excludePatterns: $('#excludePatterns').val()
-        }, function() {
+        }, function(res) {
+            var data = (typeof res === 'object') ? res : null;
+            try { if (!data) data = JSON.parse(res); } catch(e) {}
+
+            if (!data || !data.success) {
+                var err = (data && data.error) ? data.error : 'Server rejected scan request.';
+                showError(err);
+                $('#logBox').val($('#logBox').val() + 'ERROR: ' + err + '\n');
+                resetButtons();
+                stopPolling();
+                $('#progressContainer').hide();
+                return;
+            }
+
             pollInterval = setInterval(checkStatus, 1500);
+            checkStatus();
         }).fail(function(xhr) {
-            showError('Failed to start scan: ' + (xhr.statusText || 'Network error'));
+            showError('Failed to communicate with Dedupe API: ' + (xhr.statusText || 'Network error'));
             resetButtons();
+            stopPolling();
             $('#progressContainer').hide();
         });
     }
@@ -364,7 +393,9 @@ if (file_exists($cfgFile)) {
     function fetchLogs() {
         $.post('/plugins/dedupe/api.php', { action: 'logs' }, function(res) {
             var lb = $('#logBox');
-            if (res && lb.val() !== res) { lb.val(res).scrollTop(lb[0].scrollHeight); }
+            if (res && lb.val() !== res) {
+                lb.val(res).scrollTop(lb[0].scrollHeight);
+            }
         });
     }
 
@@ -394,8 +425,21 @@ if (file_exists($cfgFile)) {
                     resetButtons();
                     $('#progressContainer').hide();
                     $('#statusArea').text('Scan cancelled.');
-                } else if (data.status === 'idle') {
+                } else if (data.status === 'error') {
                     stopPolling();
+                    resetButtons();
+                    $('#progressContainer').hide();
+                    showError(data.message || 'Scan encountered an error.');
+                    fetchLogs();
+                } else if (data.status === 'idle') {
+                    if (isScanning) {
+                        // Scan was supposed to be running but died
+                        stopPolling();
+                        resetButtons();
+                        $('#progressContainer').hide();
+                        showError('Scan process stopped unexpectedly. Click "Toggle Logs" to see details.');
+                        fetchLogs();
+                    }
                 }
             } catch(e) {}
         });
@@ -451,7 +495,6 @@ if (file_exists($cfgFile)) {
         var mode = $('#smartSelectMode').val();
         var pattern = $('#smartSelectPattern').val().toLowerCase().trim();
 
-        // Process by group
         var groups = {};
         $('.dupe-checkbox').each(function() {
             var g = $(this).data('group');
@@ -465,28 +508,24 @@ if (file_exists($cfgFile)) {
             var keeperIndex = 0;
 
             if (mode === 'oldest') {
-                // Find file with smallest mtime
                 var minTime = Infinity;
                 boxArray.forEach(function(box, i) {
                     var t = parseInt(box.data('mtime')) || 0;
                     if (t > 0 && t < minTime) { minTime = t; keeperIndex = i; }
                 });
             } else if (mode === 'newest') {
-                // Find file with largest mtime
                 var maxTime = -1;
                 boxArray.forEach(function(box, i) {
                     var t = parseInt(box.data('mtime')) || 0;
                     if (t > maxTime) { maxTime = t; keeperIndex = i; }
                 });
             } else if (mode === 'shortest') {
-                // Shortest string length
                 var minLen = Infinity;
                 boxArray.forEach(function(box, i) {
                     var len = box.val().length;
                     if (len < minLen) { minLen = len; keeperIndex = i; }
                 });
             } else if (mode === 'pattern' && pattern) {
-                // First file matching pattern
                 var matched = false;
                 boxArray.forEach(function(box, i) {
                     if (!matched && box.val().toLowerCase().indexOf(pattern) !== -1) {
@@ -669,6 +708,7 @@ if (file_exists($cfgFile)) {
                     currentDuplicates = data.duplicates || [];
                     renderResults(currentDuplicates);
                 } else if (data.status === 'running' || data.status === 'paused') {
+                    isScanning = true;
                     $('#btnScan').hide();
                     if (data.status === 'paused') {
                         $('#btnResume, #btnCancel').show();
@@ -735,7 +775,7 @@ if ($action === 'logs') {
 
 /* --- Action: Start a new scan --- */
 if ($action === 'scan') {
-    $target = $_POST['target'] ?? '';
+    $target = rtrim($_POST['target'] ?? '', '/');
     $hashMethod = $_POST['hashMethod'] ?? 'sha256sum';
     $deepVerify = $_POST['deepVerify'] ?? '0';
     $minFileSize = $_POST['minFileSize'] ?? '0';
@@ -743,41 +783,59 @@ if ($action === 'scan') {
     $excludeExt = $_POST['excludeExt'] ?? '';
     $excludePatterns = $_POST['excludePatterns'] ?? '';
 
-    $realTarget = realpath($target);
-    if ($realTarget === false || strpos($realTarget, '/mnt/') !== 0) {
-        echo json_encode(['success' => false, 'error' => 'Invalid target path. Must be under /mnt/.']);
+    // Robust path validation for Unraid shares
+    if (strpos($target, '/mnt/') !== 0 || strpos($target, '..') !== false || !is_dir($target)) {
+        echo json_encode(['success' => false, 'error' => "Invalid or non-existent path: $target. Must be a directory under /mnt/."]);
         exit;
     }
 
     $allowedMethods = ['md5sum', 'sha1sum', 'sha224sum', 'sha256sum', 'sha384sum', 'sha512sum'];
     if (!in_array($hashMethod, $allowedMethods)) {
-        echo json_encode(['success' => false, 'error' => 'Invalid hash method.']);
+        echo json_encode(['success' => false, 'error' => 'Invalid hash method selected.']);
         exit;
     }
 
     $deepVerify = ($deepVerify === '1') ? '1' : '0';
     $minFileSize = preg_match('/^\d+$/', $minFileSize) ? $minFileSize : '0';
 
-    if (file_exists($statusFile)) unlink($statusFile);
-    if (file_exists($logFile)) unlink($logFile);
+    if (file_exists($statusFile)) @unlink($statusFile);
+    if (file_exists($logFile)) @unlink($logFile);
+    if (file_exists($pidFile)) @unlink($pidFile);
     
     $script = '/usr/local/emhttp/plugins/dedupe/scripts/scan.sh';
+    if (!file_exists($script)) {
+        echo json_encode(['success' => false, 'error' => "Scan script missing: $script"]);
+        exit;
+    }
+
+    // Append stderr directly to log file for full visibility
     $cmd = sprintf(
-        "nohup bash %s %s %s %s %s %s %s %s > /dev/null 2>&1 & echo $!",
+        "nohup bash %s %s %s %s %s %s %s %s >> %s 2>&1 & echo $!",
         escapeshellarg($script),
-        escapeshellarg($realTarget),
+        escapeshellarg($target),
         escapeshellarg($hashMethod),
         escapeshellarg($deepVerify),
         escapeshellarg($minFileSize),
         escapeshellarg($excludePatterns),
         escapeshellarg($includeExt),
-        escapeshellarg($excludeExt)
+        escapeshellarg($excludeExt),
+        escapeshellarg($logFile)
     );
+
     exec($cmd, $output);
-    if (!empty($output[0])) {
-        file_put_contents($pidFile, trim($output[0]));
+    $pid = trim($output[0] ?? '');
+    if (!empty($pid) && preg_match('/^\d+$/', $pid)) {
+        file_put_contents($pidFile, $pid);
     }
-    echo json_encode(['success' => true]);
+
+    // Write initial status so UI picks it up immediately
+    file_put_contents($statusFile, json_encode([
+        'status' => 'running',
+        'progress' => 0,
+        'message' => 'Initializing scan...'
+    ]));
+
+    echo json_encode(['success' => true, 'pid' => $pid]);
     exit;
 }
 
@@ -827,7 +885,11 @@ if ($action === 'delete') {
 
 /* --- Action: Return current status --- */
 if ($action === 'status') {
-    echo file_exists($statusFile) ? file_get_contents($statusFile) : json_encode(['status' => 'idle']);
+    if (file_exists($statusFile)) {
+        echo file_get_contents($statusFile);
+    } else {
+        echo json_encode(['status' => 'idle']);
+    }
     exit;
 }
 
@@ -895,16 +957,15 @@ if ($action === 'save_schedule') {
     $cfgContent = "schedule=\"$schedule\"\nschedule_target=\"$target\"\n";
     file_put_contents($cfgFile, $cfgContent);
 
-    // Update cron entry
     if ($schedule === 'disabled') {
         @unlink($cronFile);
     } else {
-        $cronTiming = '0 3 * * *'; // daily at 03:00
+        $cronTiming = '0 3 * * *';
         if ($schedule === 'weekly') { $cronTiming = '0 3 * * 0'; }
         if ($schedule === 'monthly') { $cronTiming = '0 3 1 * *'; }
 
         $cronCmd = "$cronTiming root /usr/local/emhttp/plugins/dedupe/scripts/scan.sh " .
-                   escapeshellarg($target) . " sha256sum 0 1048576 .Recycle.Bin,@eaDir,.Trash >/dev/null 2>&1\n";
+                   escapeshellarg($target) . " sha256sum 0 1048576 .Recycle.Bin,@eaDir,.Trash >> /tmp/dedupe_scan.log 2>&1\n";
         file_put_contents($cronFile, $cronCmd);
     }
 
@@ -923,13 +984,10 @@ echo json_encode(['success' => false, 'error' => 'Unknown action.']);
 <INLINE>
 <![CDATA[
 #!/bin/bash
-# Dedupe Scanner — Background scan script
-# Usage: scan.sh <target> <hash_cmd> <deep_verify> <min_size> <exclude_patterns> [include_ext] [exclude_ext]
+# Dedupe Scanner — Background scan engine
 
-set -euo pipefail
-
-TARGET="$1"
-HASH_CMD="$2"
+TARGET="${1:-/mnt/user/}"
+HASH_CMD="${2:-sha256sum}"
 DEEP_VERIFY="${3:-0}"
 MIN_SIZE="${4:-0}"
 EXCLUDE_PATTERNS="${5:-}"
@@ -938,13 +996,14 @@ EXCLUDE_EXT="${7:-}"
 
 STATUS_FILE="/tmp/dedupe_status.json"
 LOG_FILE="/tmp/dedupe_scan.log"
-TMP_HASHES=$(mktemp /tmp/dedupe_hashes.XXXXXX)
-TMP_CANDIDATES=$(mktemp /tmp/dedupe_candidates.XXXXXX)
+TMP_CANDIDATES=$(mktemp /tmp/dedupe_cand.XXXXXX)
+TMP_FILTERED=$(mktemp /tmp/dedupe_filt.XXXXXX)
+TMP_HASHES=$(mktemp /tmp/dedupe_hash.XXXXXX)
 
 cleanup() {
-    rm -f "$TMP_HASHES" "$TMP_CANDIDATES"
+    rm -f "$TMP_CANDIDATES" "$TMP_FILTERED" "$TMP_HASHES"
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
 
 update_status() {
     local tmp="${STATUS_FILE}.tmp"
@@ -952,99 +1011,104 @@ update_status() {
     mv -f "$tmp" "$STATUS_FILE"
 }
 
-rotate_log() {
-    if [ -f "$LOG_FILE" ] && [ $(stat -c%s "$LOG_FILE" 2>/dev/null || stat -f%z "$LOG_FILE" 2>/dev/null || echo 0) -gt 1048576 ]; then
-        tail -n 1000 "$LOG_FILE" > "${LOG_FILE}.tmp" && mv -f "${LOG_FILE}.tmp" "$LOG_FILE"
-    fi
-}
-
 log_msg() {
-    rotate_log
     echo "[$(date '+%H:%M:%S')] $1" >> "$LOG_FILE"
 }
 
 log_msg "=== Dedupe Scan Started ==="
-log_msg "Target: $TARGET"
-log_msg "Hash Method: $HASH_CMD"
-log_msg "Deep Verify: $([ "$DEEP_VERIFY" = "1" ] && echo "Enabled" || echo "Disabled")"
-log_msg "Min File Size: $MIN_SIZE bytes"
-log_msg "Include Extensions: ${INCLUDE_EXT:-all}"
-log_msg "Exclude Extensions: ${EXCLUDE_EXT:-none}"
-log_msg "Exclude Patterns: ${EXCLUDE_PATTERNS:-none}"
+log_msg "Target directory: $TARGET"
+log_msg "Hash algorithm: $HASH_CMD"
+log_msg "Deep verification: $([ "$DEEP_VERIFY" = "1" ] && echo "Enabled" || echo "Disabled")"
+log_msg "Minimum file size: $MIN_SIZE bytes"
+log_msg "Include extensions: ${INCLUDE_EXT:-all}"
+log_msg "Exclude extensions: ${EXCLUDE_EXT:-none}"
+log_msg "Exclude paths: ${EXCLUDE_PATTERNS:-none}"
 
-# --- Step 1: Find all files matching criteria ---
-update_status 5 "Step 1/4: Indexing files..."
+# --- Step 1: Find matching files ---
+update_status 5 "Step 1/4: Indexing files in $TARGET..."
 
-FIND_CMD="find \"$TARGET\" -type f"
+FIND_ARGS=("$TARGET" -type f)
 
-# Minimum size filter
 if [ "$MIN_SIZE" -gt 0 ] 2>/dev/null; then
-    FIND_CMD="$FIND_CMD -size +${MIN_SIZE}c"
+    FIND_ARGS+=(-size "+${MIN_SIZE}c")
 fi
 
-# Exclude folder patterns
 if [ -n "$EXCLUDE_PATTERNS" ]; then
     IFS=',' read -ra PATTERNS <<< "$EXCLUDE_PATTERNS"
     for pattern in "${PATTERNS[@]}"; do
         pattern=$(echo "$pattern" | xargs)
         if [ -n "$pattern" ]; then
-            FIND_CMD="$FIND_CMD -not -path \"*/${pattern}/*\""
+            FIND_ARGS+=(-not -path "*/${pattern}/*")
         fi
     done
 fi
 
-# Exclude file extensions
 if [ -n "$EXCLUDE_EXT" ]; then
     IFS=',' read -ra EXTS <<< "$EXCLUDE_EXT"
     for ext in "${EXTS[@]}"; do
         ext=$(echo "$ext" | xargs | sed 's/^\.//')
         if [ -n "$ext" ]; then
-            FIND_CMD="$FIND_CMD -not -iname \"*.${ext}\""
+            FIND_ARGS+=(-not -iname "*.${ext}")
         fi
     done
 fi
 
-# Include file extensions
 if [ -n "$INCLUDE_EXT" ]; then
     IFS=',' read -ra INCS <<< "$INCLUDE_EXT"
-    INC_CLAUSE=""
+    INC_ARRAY=()
     for ext in "${INCS[@]}"; do
         ext=$(echo "$ext" | xargs | sed 's/^\.//')
         if [ -n "$ext" ]; then
-            if [ -z "$INC_CLAUSE" ]; then
-                INC_CLAUSE="-iname \"*.${ext}\""
-            else
-                INC_CLAUSE="$INC_CLAUSE -o -iname \"*.${ext}\""
+            if [ ${#INC_ARRAY[@]} -gt 0 ]; then
+                INC_ARRAY+=(-o)
             fi
+            INC_ARRAY+=(-iname "*.${ext}")
         fi
     done
-    if [ -n "$INC_CLAUSE" ]; then
-        FIND_CMD="$FIND_CMD \\( $INC_CLAUSE \\)"
+    if [ ${#INC_ARRAY[@]} -gt 0 ]; then
+        FIND_ARGS+=(\( "${INC_ARRAY[@]}" \))
     fi
 fi
 
-# Output format: %s (size in bytes), %T@ (epoch modification time), %p (path)
-FIND_CMD="$FIND_CMD -printf \"%s\t%T@\t%p\n\""
+# Print: size<TAB>mtime<TAB>path
+FIND_ARGS+=(-printf "%s\t%T@\t%p\n")
 
-eval "$FIND_CMD" 2>/dev/null | sort -n > "$TMP_CANDIDATES"
-TOTAL_FILES=$(wc -l < "$TMP_CANDIDATES")
-log_msg "Found $TOTAL_FILES candidate files matching criteria."
+find "${FIND_ARGS[@]}" 2>/dev/null | sort -n > "$TMP_CANDIDATES"
+
+TOTAL_FILES=$(wc -l < "$TMP_CANDIDATES" | tr -d ' ')
+log_msg "Indexed $TOTAL_FILES candidate files."
 
 if [ "$TOTAL_FILES" -eq 0 ]; then
-    log_msg "No files found matching criteria. Scan complete."
+    log_msg "No files found matching scan criteria. Scan complete."
     tmp="${STATUS_FILE}.tmp"
     echo '{"status":"complete","duplicates":[]}' > "$tmp"
     mv -f "$tmp" "$STATUS_FILE"
     exit 0
 fi
 
-# --- Step 2: Identify size duplicates ---
-update_status 15 "Step 2/4: Identifying size duplicates..."
+# --- Step 2: Identify files sharing identical sizes ---
+update_status 15 "Step 2/4: Identifying matching file sizes..."
 
-POTENTIAL=$(awk -F'\t' '{count[$1]++} END{c=0; for(i in count) if(count[i]>1) c+=count[i]; print c}' "$TMP_CANDIDATES")
-log_msg "Found $POTENTIAL files with matching sizes."
+# Filter only files whose byte size appears more than once
+awk -F'\t' '{
+    size = $1
+    mtime = int($2)
+    path = $3
+    entry = size "\t" mtime "\t" path
+    a[size] = a[size] ? a[size] "\n" entry : entry
+    count[size]++
+} END {
+    for (s in count) {
+        if (count[s] > 1) {
+            print a[s]
+        }
+    }
+}' "$TMP_CANDIDATES" > "$TMP_FILTERED"
 
-if [ -z "$POTENTIAL" ] || [ "$POTENTIAL" -eq 0 ] 2>/dev/null; then
+POTENTIAL=$(wc -l < "$TMP_FILTERED" | tr -d ' ')
+log_msg "Found $POTENTIAL files sharing matching byte sizes."
+
+if [ "$POTENTIAL" -eq 0 ]; then
     log_msg "No files share identical sizes. No duplicates possible. Scan complete."
     tmp="${STATUS_FILE}.tmp"
     echo '{"status":"complete","duplicates":[]}' > "$tmp"
@@ -1052,28 +1116,17 @@ if [ -z "$POTENTIAL" ] || [ "$POTENTIAL" -eq 0 ] 2>/dev/null; then
     exit 0
 fi
 
-# --- Step 3: Hash only matching-size candidates ---
-update_status 30 "Step 3/4: Hashing $POTENTIAL candidates..."
+# --- Step 3: Hash matching candidates ---
+update_status 30 "Step 3/4: Hashing $POTENTIAL candidate files..."
 
-# Group paths by size, extract only those with count > 1
-awk -F'\t' '{
-    path = $3
-    mtime = int($2)
-    entry = path "\t" mtime
-    a[$1] = a[$1] ? a[$1] "\n" entry : entry
-    count[$1]++
-} END {
-    for(i in count) if(count[i] > 1) print a[i]
-}' "$TMP_CANDIDATES" > "${TMP_CANDIDATES}.filtered"
-
-# Run hashing command and save hash + mtime + path
-awk -F'\t' '{print $1}' "${TMP_CANDIDATES}.filtered" \
+# Safe batch hashing: process paths via xargs while ignoring missing/locked file errors
+awk -F'\t' '{print $3}' "$TMP_FILTERED" \
     | tr '\n' '\0' \
     | xargs -0 -n 10 "$HASH_CMD" 2>/dev/null \
     | awk -v total="$POTENTIAL" -v sf="$STATUS_FILE" '
 {
     print $0; count++
-    if (count % 50 == 0 || count == total) {
+    if (count % 20 == 0 || count == total) {
         p = 30 + int((count * 50) / (total > 0 ? total : 1))
         if (p > 80) p = 80
         tmp = sf ".tmp"
@@ -1081,7 +1134,10 @@ awk -F'\t' '{print $1}' "${TMP_CANDIDATES}.filtered" \
         close(tmp)
         system("mv -f " tmp " " sf)
     }
-}' > "$TMP_HASHES"
+}' > "$TMP_HASHES" || true
+
+HASHED_COUNT=$(wc -l < "$TMP_HASHES" | tr -d ' ')
+log_msg "Successfully hashed $HASHED_COUNT files."
 
 # --- Step 4: Finalize duplicates and metadata ---
 update_status 85 "Step 4/4: Finalizing report..."
@@ -1091,6 +1147,13 @@ update_status 85 "Step 4/4: Finalizing report..."
     $statusFile = $argv[2];
     $logFile = $argv[3];
     $deepVerify = $argv[4];
+
+    if (!file_exists($hashFile)) {
+        $tmp = $statusFile . ".tmp";
+        file_put_contents($tmp, json_encode(["status" => "complete", "duplicates" => []]));
+        rename($tmp, $statusFile);
+        exit;
+    }
 
     $lines = file($hashFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
     $hashes = [];
@@ -1168,16 +1231,16 @@ update_status 85 "Step 4/4: Finalizing report..."
     }
     file_put_contents($logFile, $msg, FILE_APPEND);
 
-    // Unraid Native Notification
+    // Unraid Notification
     $notifyMsg = "Found $groupCount duplicate groups. Potential savings: $wastedStr";
-    exec("/usr/local/emhttp/webGui/scripts/notify " .
+    @exec("/usr/local/emhttp/webGui/scripts/notify " .
          "-e \"Dedupe\" " .
          "-s \"Dedupe Scan Finished\" " .
          "-d " . escapeshellarg($notifyMsg) . " " .
          "-i normal");
 ' "$TMP_HASHES" "$STATUS_FILE" "$LOG_FILE" "$DEEP_VERIFY"
 
-log_msg "Scanner finished successfully."
+log_msg "Scanner process completed successfully."
 ]]>
 </INLINE>
 </FILE>
@@ -1187,10 +1250,8 @@ log_msg "Scanner finished successfully."
 <INLINE>
 <![CDATA[
 echo "Removing dedupe plugin and cleaning up..."
-# Remove scheduled cron if present
 rm -f /etc/cron.d/dedupe_scan
 
-# Stop any running scan
 if [ -f /tmp/dedupe_scan.pid ]; then
     PID=$(cat /tmp/dedupe_scan.pid)
     if echo "$PID" | grep -qE '^[0-9]+$'; then
@@ -1199,13 +1260,10 @@ if [ -f /tmp/dedupe_scan.pid ]; then
     fi
 fi
 
-# Remove webGUI files
 rm -rf /usr/local/emhttp/plugins/dedupe
-
-# Clean up temp data
 rm -f /tmp/dedupe_status.json /tmp/dedupe_status.json.tmp
 rm -f /tmp/dedupe_scan.log /tmp/dedupe_scan.pid
-rm -f /tmp/dedupe_hashes.* /tmp/dedupe_candidates.*
+rm -f /tmp/dedupe_cand.* /tmp/dedupe_filt.* /tmp/dedupe_hash.*
 echo "Cleanup complete. Dedupe has been removed from your Utilities menu."
 ]]>
 </INLINE>
