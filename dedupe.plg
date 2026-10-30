@@ -3,7 +3,7 @@
 <!ENTITY name "dedupe">
 <!ENTITY author "James Green">
 <!ENTITY version "2026.10.30">
-<!ENTITY pluginURL "https://raw.githubusercontent.com/greenyc20/unraid-dedupe/main/dedupe.plg">
+<!ENTITY pluginURL "https://raw.githubusercontent.com/greenycq20/unraid-dedupe/main/dedupe.plg">
 ]>
 <PLUGIN name="&name;" author="&author;" version="&version;" pluginURL="&pluginURL;" min="6.9.0" icon="clone">
 

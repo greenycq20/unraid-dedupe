@@ -32,7 +32,7 @@ A high-performance deduplication tool for Unraid OS. Scan your shares for identi
 1. Copy `dedupe.plg` to your Unraid flash drive:
    ```bash
    # From your Unraid terminal:
-   wget -O /boot/config/plugins/dedupe.plg https://raw.githubusercontent.com/greenyc20/unraid-dedupe/main/dedupe.plg
+   wget -O /boot/config/plugins/dedupe.plg https://raw.githubusercontent.com/greenycq20/unraid-dedupe/main/dedupe.plg
    installplg /boot/config/plugins/dedupe.plg
    ```
 2. The plugin appears under **Utilities → Dedupe Tool** in the webGUI
@@ -84,7 +84,7 @@ This plugin runs with root privileges (as all Unraid plugins do). Security measu
 ## Support
 
 - **Unraid Forums**: [Support Thread](https://forums.unraid.net/) *(link TBD)*
-- **Issues**: [GitHub Issues](https://github.com/greenyc20/unraid-dedupe/issues)
+- **Issues**: [GitHub Issues](https://github.com/greenycq20/unraid-dedupe/issues)
 
 ## License
 

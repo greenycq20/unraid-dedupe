@@ -20,7 +20,7 @@ git init
 git add .
 git commit -m "Initial release v2026.10.30"
 git branch -M main
-git remote add origin https://github.com/greenyc20/unraid-dedupe.git
+git remote add origin https://github.com/greenycq20/unraid-dedupe.git
 git push -u origin main
 ```
 
@@ -31,7 +31,7 @@ Replace `YOURUSERNAME` with your GitHub username.
 After pushing, update the `pluginURL` entity in `unraid_dedupe_plugin.xml`:
 
 ```xml
-<!ENTITY pluginURL "https://raw.githubusercontent.com/greenyc20/unraid-dedupe/main/dedupe.plg">
+<!ENTITY pluginURL "https://raw.githubusercontent.com/greenycq20/unraid-dedupe/main/dedupe.plg">
 ```
 
 > **Important:** This URL must point to the **raw** file content, not the GitHub HTML page.
@@ -58,12 +58,12 @@ Template format (`dedupe.xml`):
 <?xml version="1.0"?>
 <Containers>
   <Plugin>
-    <PluginURL>https://raw.githubusercontent.com/greenyc20/unraid-dedupe/main/dedupe.plg</PluginURL>
+    <PluginURL>https://raw.githubusercontent.com/greenycq20/unraid-dedupe/main/dedupe.plg</PluginURL>
     <Name>Dedupe</Name>
     <Overview>A high-performance deduplication tool for Unraid. Scan your shares for identical files using SHA/MD5 hashing and reclaim wasted space.</Overview>
     <Category>Tools:Utilities</Category>
     <Support>https://forums.unraid.net/topic/XXXXX-dedupe/</Support>
-    <Icon>https://raw.githubusercontent.com/greenyc20/unraid-dedupe/main/icon/dedupe-icon.png</Icon>
+    <Icon>https://raw.githubusercontent.com/greenycq20/unraid-dedupe/main/icon/dedupe-icon.png</Icon>
     <Description>Scan your Unraid shares for duplicate files and reclaim wasted array space.</Description>
   </Plugin>
 </Containers>
