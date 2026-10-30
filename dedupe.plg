@@ -1,0 +1,882 @@
+<?xml version="1.0" standalone="yes"?>
+<!DOCTYPE PLUGIN [
+<!ENTITY name "dedupe">
+<!ENTITY author "James Green">
+<!ENTITY version "2026.10.30">
+<!ENTITY pluginURL "https://raw.githubusercontent.com/greenyc20/unraid-dedupe/main/dedupe.plg">
+]>
+<PLUGIN name="&name;" author="&author;" version="&version;" pluginURL="&pluginURL;" min="6.9.0" icon="clone">
+
+<CHANGES>
+###2026.10.30
+- SECURITY: Fixed XSS vulnerability — all file paths are now escaped before rendering in the results table.
+- SECURITY: Fixed path traversal in delete API — uses realpath() to canonicalize paths before validation.
+- SECURITY: Fixed potential command injection via PID file — PIDs are now validated as numeric.
+- SECURITY: Added Content-Type headers to all JSON API responses.
+- FIX: Implemented deep verification (byte-by-byte cmp) — previously the checkbox was accepted but never used.
+- FIX: Scan script now handles empty directories and zero-candidate scenarios gracefully.
+- FIX: Progress calculation no longer divides by zero when no candidates are found.
+- FIX: Status file writes are now atomic (write to temp, then mv) to prevent corrupt JSON reads.
+- FIX: Removed broken PNG icon placeholder; plugin now uses FontAwesome icon exclusively.
+- FIX: Page-load status check now handles 'idle' state properly and doesn't start polling.
+- FIX: Added AJAX error handlers to all API calls for user feedback on failures.
+- IMPROVEMENT: Added minimum file size filter to skip tiny files.
+- IMPROVEMENT: Added exclusion pattern support (.Recycle.Bin, @eaDir, thumbs, etc).
+- IMPROVEMENT: Results persist across page navigation — reload the page and results are still there.
+- IMPROVEMENT: Better delete confirmation showing file count and estimated space reclamation.
+- IMPROVEMENT: Scan log now shows file counts, timing, and space statistics.
+
+###2026.04.01
+- CRITICAL FIX: Hardcoded plugin name in uninstallation bash script to prevent XML CDATA variable escaping which caused the entire plugins RAM directory to be wiped.
+- Fixed uninstallation cleanup to ensure the tool is removed from the webGUI immediately.
+- Restored full SHA hash suite (SHA-1, SHA-224, SHA-256, SHA-384, SHA-512).
+- Generalized all comments and UI text for public release.
+- Unified plugin icons and added description for the Plugins page.
+- Integrated Unraid Native Notification system for scan completion alerts.
+- Added space reclamation tracking: logs now show total space saved after deletions.
+</CHANGES>
+
+<DESCRIPTION>
+A high-performance deduplication tool for Unraid. Scan your shares for identical files using hardware-accelerated SHA/MD5 hashing and reclaim wasted array space with ease.
+</DESCRIPTION>
+
+<!-- 1. PAGE FILE — Menu entry under Utilities -->
+<FILE Name="/usr/local/emhttp/plugins/&name;/Dedupe.page">
+<INLINE>
+<![CDATA[
+Menu="Utilities"
+Title="Dedupe Tool"
+Icon="clone"
+---
+<?php include '/usr/local/emhttp/plugins/dedupe/Dedupe.php'; ?>
+]]>
+</INLINE>
+</FILE>
+
+<!-- 2. MAIN UI — PHP + HTML + JavaScript -->
+<FILE Name="/usr/local/emhttp/plugins/&name;/Dedupe.php">
+<INLINE>
+<![CDATA[
+<?php
+$shares = [];
+$userSharesPath = '/mnt/user';
+if (is_dir($userSharesPath)) {
+    $dirs = array_filter(glob($userSharesPath . '/*'), 'is_dir');
+    foreach ($dirs as $dir) { $shares[] = basename($dir); }
+}
+?>
+
+<div style="width: 100%; max-width: 1200px; margin: 0 auto;">
+    <h2>Deduplication Scanner</h2>
+    <p>Select a specific share or directory to scan for identical files.</p>
+    
+    <table class="settings">
+        <tr>
+            <td style="width: 20%;"><b>Target Path:</b></td>
+            <td>
+                <select id="targetPath">
+                    <option value="/mnt/user/">All User Shares (/mnt/user/)</option>
+                    <?php foreach($shares as $share): ?>
+                        <option value="/mnt/user/<?= htmlspecialchars($share, ENT_QUOTES, 'UTF-8') ?>"><?= htmlspecialchars($share, ENT_QUOTES, 'UTF-8') ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </td>
+        </tr>
+        <tr>
+            <td>
+                <a href="javascript:void(0)" onclick="$('#advanced_settings').slideToggle()" style="text-decoration:none; color:inherit;">
+                    <i class="fa fa-cog"></i> <b>Advanced Settings</b> <i class="fa fa-chevron-down"></i>
+                </a>
+            </td>
+            <td>
+                <div id="advanced_settings" style="display:none; padding: 15px; background: rgba(0,0,0,0.1); border-radius: 4px;">
+                    <div style="margin-bottom:15px;">
+                        <label><b>Hash Method:</b></label><br>
+                        <select id="hashMethod" style="margin-top:5px; width: 300px;">
+                            <option value="md5sum">MD5 (Fastest, widely compatible)</option>
+                            <option value="sha1sum">SHA-1</option>
+                            <option value="sha224sum">SHA-224</option>
+                            <option value="sha256sum" selected>SHA-256 (Modern standard)</option>
+                            <option value="sha384sum">SHA-384</option>
+                            <option value="sha512sum">SHA-512 (High performance on 64-bit)</option>
+                        </select>
+                        <div style="font-size:0.9em; color:#888; margin-top:4px;">Note: Performance may vary based on CPU hardware acceleration support.</div>
+                    </div>
+                    <div style="margin-bottom:15px;">
+                        <label><b>Minimum File Size:</b></label><br>
+                        <select id="minFileSize" style="margin-top:5px; width: 300px;">
+                            <option value="0">No minimum (scan all files)</option>
+                            <option value="1024">1 KB</option>
+                            <option value="10240">10 KB</option>
+                            <option value="102400">100 KB</option>
+                            <option value="1048576" selected>1 MB (Recommended)</option>
+                            <option value="10485760">10 MB</option>
+                            <option value="104857600">100 MB</option>
+                        </select>
+                        <div style="font-size:0.9em; color:#888; margin-top:4px;">Skip files smaller than this size. Avoids wasting time on tiny config files and metadata.</div>
+                    </div>
+                    <div style="margin-bottom:15px;">
+                        <label><b>Exclude Paths Containing:</b></label><br>
+                        <input type="text" id="excludePatterns" value=".Recycle.Bin,@eaDir,.Trash" style="margin-top:5px; width: 500px;">
+                        <div style="font-size:0.9em; color:#888; margin-top:4px;">Comma-separated list of directory names to skip (e.g., .Recycle.Bin, @eaDir, .Trash).</div>
+                    </div>
+                    <div>
+                        <input type="checkbox" id="deepVerify" value="1">
+                        <label for="deepVerify"><b>Deep Verification:</b> Perform byte-by-byte comparison after hashing to guarantee 100% data integrity (slower but eliminates any chance of hash collision false positives)</label>
+                    </div>
+                </div>
+            </td>
+        </tr>
+        <tr>
+            <td><b>Actions:</b></td>
+            <td>
+                <input type="button" id="btnScan" value="Start Scan" onclick="startScan()">
+                <input type="button" id="btnPause" value="Pause" onclick="pauseScan()" style="display: none; background: #f39c12; color: white;">
+                <input type="button" id="btnResume" value="Resume" onclick="resumeScan()" style="display: none; background: #27ae60; color: white;">
+                <input type="button" id="btnCancel" value="Cancel" onclick="cancelScan()" style="display: none; background: #e74c3c; color: white;">
+                <input type="button" id="btnLogs" value="Toggle Logs" onclick="toggleLogs()">
+            </td>
+        </tr>
+    </table>
+
+    <div id="statusArea" style="margin-top: 20px; font-weight: bold;">Ready.</div>
+    
+    <div id="progressContainer" style="display: none; width: 100%; background: #2c2d30; border-radius: 4px; margin-top: 10px; border: 1px solid #444; position: relative; height: 26px; overflow: hidden;">
+        <div id="progressBar" style="width: 0%; height: 100%; background: #ff8c00; transition: width 0.3s ease;"></div>
+        <div id="progressText" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; text-align: center; line-height: 26px; color: #fff; font-weight: bold; font-size: 13px; text-shadow: 1px 1px 2px rgba(0,0,0,0.5);">0%</div>
+    </div>
+
+    <textarea id="logBox" style="width: 100%; height: 300px; display: none; font-family: monospace; margin-top: 15px; padding: 10px; box-sizing: border-box;" readonly></textarea>
+    
+    <div id="resultsArea" style="display: none; margin-top: 30px;">
+        <div style="display: flex; gap: 10px; margin-bottom: 15px; align-items: center;">
+            <input type="button" value="Delete Selected Duplicates" onclick="deleteSelected()" style="color: #d9534f; font-weight: bold;">
+            <input type="button" value="Select All Duplicates" onclick="selectAllDupes()" style="font-weight: bold;">
+            <input type="button" value="Deselect All" onclick="deselectAllDupes()" style="font-weight: bold;">
+            <input type="button" value="Clear Results" onclick="clearResults()" style="font-weight: bold;">
+            <span id="selectionSummary" style="margin-left: 15px; color: #888;"></span>
+        </div>
+        
+        <table class="tablesorter">
+            <thead>
+                <tr>
+                    <th style="width: 5%;">Select</th>
+                    <th style="width: 55%;">File Path</th>
+                    <th style="width: 25%;">Group Hash</th>
+                    <th style="width: 15%;">Size</th>
+                </tr>
+            </thead>
+            <tbody id="duplicateList"></tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+    let pollInterval = null;
+    let logInterval = null;
+
+    function toggleLogs() { $('#logBox').slideToggle(); }
+    
+    function formatBytes(bytes, decimals) {
+        decimals = decimals !== undefined ? decimals : 2;
+        if (!+bytes) return '0 Bytes';
+        var k = 1024;
+        var dm = decimals < 0 ? 0 : decimals;
+        var sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+        var i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+    }
+
+    /* XSS-safe text escaping */
+    function escapeHtml(str) {
+        var div = document.createElement('div');
+        div.appendChild(document.createTextNode(str));
+        return div.innerHTML;
+    }
+
+    function resetButtons() {
+        $('#btnScan').show().prop('disabled', false).val('Start Scan');
+        $('#btnPause, #btnResume, #btnCancel').hide();
+    }
+
+    function stopPolling() {
+        if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+        if (logInterval) { clearInterval(logInterval); logInterval = null; }
+    }
+
+    function showError(msg) {
+        $('#statusArea').html('<i class="fa fa-exclamation-triangle" style="color:#e74c3c;"></i> ' + escapeHtml(msg));
+    }
+
+    function startScan() {
+        var target = $('#targetPath').val();
+        if (target.indexOf('/mnt/') !== 0) { alert("Path must start with /mnt/"); return; }
+
+        $('#btnScan').hide();
+        $('#btnPause, #btnCancel').show();
+        $('#resultsArea').hide();
+        $('#statusArea').html('<i class="fa fa-spinner fa-spin"></i> Initializing...');
+        $('#progressContainer').show();
+        $('#progressBar').css('width', '0%');
+        $('#progressText').text('0%');
+        $('#logBox').val('Scan started...\n');
+
+        stopPolling();
+        logInterval = setInterval(fetchLogs, 1000);
+
+        $.post('/plugins/dedupe/api.php', { 
+            action: 'scan',
+            target: target,
+            hashMethod: $('#hashMethod').val(),
+            deepVerify: $('#deepVerify').is(':checked') ? '1' : '0',
+            minFileSize: $('#minFileSize').val(),
+            excludePatterns: $('#excludePatterns').val()
+        }, function() {
+            pollInterval = setInterval(checkStatus, 1500);
+        }).fail(function(xhr) {
+            showError('Failed to start scan: ' + (xhr.statusText || 'Network error'));
+            resetButtons();
+            $('#progressContainer').hide();
+        });
+    }
+
+    function pauseScan() {
+        $.post('/plugins/dedupe/api.php', { action: 'pause' }).fail(function() {
+            showError('Failed to pause scan.');
+        });
+    }
+
+    function resumeScan() {
+        $.post('/plugins/dedupe/api.php', { action: 'resume' }).fail(function() {
+            showError('Failed to resume scan.');
+        });
+    }
+
+    function cancelScan() {
+        if (confirm("Cancel the current scan?")) {
+            $.post('/plugins/dedupe/api.php', { action: 'cancel' }).fail(function() {
+                showError('Failed to cancel scan.');
+            });
+        }
+    }
+
+    function fetchLogs() {
+        $.post('/plugins/dedupe/api.php', { action: 'logs' }, function(res) {
+            var lb = $('#logBox');
+            if (res && lb.val() !== res) { lb.val(res).scrollTop(lb[0].scrollHeight); }
+        });
+    }
+
+    function checkStatus() {
+        $.post('/plugins/dedupe/api.php', { action: 'status' }, function(res) {
+            try {
+                var data = JSON.parse(res);
+                if (data.status === 'complete') {
+                    stopPolling();
+                    fetchLogs();
+                    resetButtons();
+                    $('#progressContainer').hide();
+                    renderResults(data.duplicates || []);
+                } else if (data.status === 'running') {
+                    $('#statusArea').html('<i class="fa fa-spinner fa-spin"></i> ' + escapeHtml(data.message || 'Scanning...'));
+                    if (data.progress !== undefined) {
+                        $('#progressBar').css('width', data.progress + '%');
+                        $('#progressText').text(data.progress + '%');
+                    }
+                } else if (data.status === 'paused') {
+                    $('#btnPause').hide();
+                    $('#btnResume').show();
+                    $('#statusArea').html('<i class="fa fa-pause"></i> Paused.');
+                } else if (data.status === 'cancelled') {
+                    stopPolling();
+                    resetButtons();
+                    $('#progressContainer').hide();
+                    $('#statusArea').text('Scan cancelled.');
+                } else if (data.status === 'idle') {
+                    /* No scan running — stop polling if we were polling */
+                    stopPolling();
+                }
+            } catch(e) {
+                /* Corrupt or incomplete JSON — skip this poll cycle */
+            }
+        }).fail(function() {
+            /* Silently retry on next interval */
+        });
+    }
+
+    function renderResults(duplicates) {
+        var totalGroups = duplicates.length;
+        var totalDupeFiles = 0;
+        var totalWastedBytes = 0;
+        duplicates.forEach(function(group) {
+            var extras = group.files.length - 1;
+            totalDupeFiles += extras;
+            totalWastedBytes += (group.size || 0) * extras;
+        });
+
+        if (totalGroups === 0) {
+            $('#statusArea').html('<i class="fa fa-check-circle" style="color:#27ae60;"></i> Scan complete. No duplicates found!');
+            return;
+        }
+
+        $('#statusArea').html('<i class="fa fa-check-circle" style="color:#27ae60;"></i> Scan complete. Found <b>' + totalGroups + '</b> duplicate groups (' + totalDupeFiles + ' extra files, <b>' + formatBytes(totalWastedBytes) + '</b> reclaimable).');
+
+        var html = '';
+        duplicates.forEach(function(group, index) {
+            var rowColor = (index % 2 === 0) ? 'rgba(0,0,0,0.03)' : 'transparent';
+            group.files.forEach(function(file, fileIdx) {
+                /* First file in each group is the "original" — unchecked by default */
+                var isChecked = fileIdx === 0 ? '' : 'checked';
+                var isOriginalStyle = fileIdx === 0 ? 'font-weight:bold; color:#27ae60;' : '';
+                var originalBadge = fileIdx === 0 ? ' <span style="font-size:0.8em; background:#27ae60; color:#fff; padding:1px 6px; border-radius:3px;">KEEP</span>' : '';
+                html += '<tr style="background:' + rowColor + ';">' +
+                    '<td style="text-align: center;"><input type="checkbox" class="dupe-checkbox" data-size="' + (group.size || 0) + '" value="' + escapeHtml(file) + '" ' + isChecked + ' onchange="updateSelectionSummary()"></td>' +
+                    '<td style="' + isOriginalStyle + '">' + escapeHtml(file) + originalBadge + '</td>' +
+                    '<td>Group ' + (index + 1) + '</td>' +
+                    '<td>' + formatBytes(group.size) + '</td>' +
+                    '</tr>';
+            });
+        });
+        $('#duplicateList').html(html);
+        $('#resultsArea').show();
+        updateSelectionSummary();
+    }
+
+    function updateSelectionSummary() {
+        var count = 0;
+        var bytes = 0;
+        $('.dupe-checkbox:checked').each(function() {
+            count++;
+            bytes += parseInt($(this).data('size')) || 0;
+        });
+        if (count > 0) {
+            $('#selectionSummary').text(count + ' files selected (' + formatBytes(bytes) + ' to reclaim)');
+        } else {
+            $('#selectionSummary').text('No files selected');
+        }
+    }
+
+    function selectAllDupes() {
+        $('.dupe-checkbox').prop('checked', true);
+        updateSelectionSummary();
+    }
+
+    function deselectAllDupes() {
+        $('.dupe-checkbox').prop('checked', false);
+        updateSelectionSummary();
+    }
+
+    function deleteSelected() {
+        var toDelete = [];
+        var totalBytes = 0;
+        $('.dupe-checkbox:checked').each(function() {
+            toDelete.push($(this).val());
+            totalBytes += parseInt($(this).data('size')) || 0;
+        });
+        if (!toDelete.length) { alert('No files selected for deletion.'); return; }
+        
+        var msg = 'Are you sure you want to permanently delete ' + toDelete.length + ' file(s)?\n\n' +
+                  'Estimated space to reclaim: ' + formatBytes(totalBytes) + '\n\n' +
+                  'This action cannot be undone.';
+        if (!confirm(msg)) return;
+        
+        $('#statusArea').html('<i class="fa fa-spinner fa-spin"></i> Deleting ' + toDelete.length + ' files...');
+        
+        $.post('/plugins/dedupe/api.php', { action: 'delete', files: toDelete }, function(res) {
+            try {
+                var data = JSON.parse(res);
+                if (data.success) {
+                    $('#statusArea').html('<i class="fa fa-check-circle" style="color:#27ae60;"></i> Deleted ' + data.deleted + ' files. Reclaimed ' + escapeHtml(data.space) + '.');
+                    /* Remove deleted rows from the table */
+                    $('.dupe-checkbox:checked').closest('tr').fadeOut(300, function() { $(this).remove(); updateSelectionSummary(); });
+                } else {
+                    showError('Delete failed: ' + (data.error || 'Unknown error'));
+                }
+            } catch(e) {
+                showError('Invalid response from server.');
+            }
+        }).fail(function(xhr) {
+            showError('Delete request failed: ' + (xhr.statusText || 'Network error'));
+        });
+    }
+
+    function clearResults() {
+        if ($('#resultsArea').is(':visible') && !confirm('Clear all scan results?')) return;
+        $.post('/plugins/dedupe/api.php', { action: 'clear' }, function() {
+            $('#resultsArea').hide();
+            $('#duplicateList').html('');
+            $('#statusArea').text('Ready.');
+            resetButtons();
+        }).fail(function() {
+            showError('Failed to clear results.');
+        });
+    }
+
+    /* On page load: check if there's an existing scan running or completed results */
+    $(function() {
+        $.post('/plugins/dedupe/api.php', { action: 'status' }, function(res) {
+            try {
+                var data = JSON.parse(res);
+                if (data.status === 'complete') {
+                    renderResults(data.duplicates || []);
+                } else if (data.status === 'running' || data.status === 'paused') {
+                    /* Scan was already in progress — resume UI tracking */
+                    $('#btnScan').hide();
+                    if (data.status === 'paused') {
+                        $('#btnResume, #btnCancel').show();
+                        $('#statusArea').html('<i class="fa fa-pause"></i> Paused.');
+                    } else {
+                        $('#btnPause, #btnCancel').show();
+                    }
+                    $('#progressContainer').show();
+                    pollInterval = setInterval(checkStatus, 1500);
+                    logInterval = setInterval(fetchLogs, 1000);
+                    checkStatus();
+                }
+                /* 'idle' — do nothing, stay in "Ready." state */
+            } catch(e) {}
+        });
+    });
+</script>
+]]>
+</INLINE>
+</FILE>
+
+<!-- 3. API BACKEND -->
+<FILE Name="/usr/local/emhttp/plugins/&name;/api.php">
+<INLINE>
+<![CDATA[
+<?php
+header('Content-Type: application/json; charset=utf-8');
+
+$action = $_POST['action'] ?? '';
+$statusFile = '/tmp/dedupe_status.json';
+$logFile = '/tmp/dedupe_scan.log';
+$pidFile = '/tmp/dedupe_scan.pid';
+
+function formatBytes($bytes) {
+    if ($bytes <= 0) return '0 B';
+    $units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    $i = floor(log($bytes, 1024));
+    return round($bytes / pow(1024, $i), 2) . ' ' . $units[$i];
+}
+
+/**
+ * Read and validate the PID from the pidfile.
+ * Returns the numeric PID string, or false if invalid/missing.
+ */
+function getValidPid($pidFile) {
+    if (!file_exists($pidFile)) return false;
+    $pid = trim(file_get_contents($pidFile));
+    /* SECURITY: Only allow numeric PIDs to prevent command injection */
+    if (!preg_match('/^\d+$/', $pid)) return false;
+    /* Check if process is actually running */
+    if (!file_exists("/proc/$pid")) return false;
+    return $pid;
+}
+
+/* --- Action: Return scan logs --- */
+if ($action === 'logs') {
+    echo file_exists($logFile) ? file_get_contents($logFile) : "";
+    exit;
+}
+
+/* --- Action: Start a new scan --- */
+if ($action === 'scan') {
+    $target = $_POST['target'] ?? '';
+    $hashMethod = $_POST['hashMethod'] ?? 'sha256sum';
+    $deepVerify = $_POST['deepVerify'] ?? '0';
+    $minFileSize = $_POST['minFileSize'] ?? '0';
+    $excludePatterns = $_POST['excludePatterns'] ?? '';
+
+    /* Validate target path — must be under /mnt/ with no traversal */
+    $realTarget = realpath($target);
+    if ($realTarget === false || strpos($realTarget, '/mnt/') !== 0) {
+        echo json_encode(['success' => false, 'error' => 'Invalid target path. Must be under /mnt/.']);
+        exit;
+    }
+
+    /* Validate hash method — whitelist only known commands */
+    $allowedMethods = ['md5sum', 'sha1sum', 'sha224sum', 'sha256sum', 'sha384sum', 'sha512sum'];
+    if (!in_array($hashMethod, $allowedMethods)) {
+        echo json_encode(['success' => false, 'error' => 'Invalid hash method.']);
+        exit;
+    }
+
+    /* Validate deepVerify — must be 0 or 1 */
+    $deepVerify = ($deepVerify === '1') ? '1' : '0';
+
+    /* Validate minFileSize — must be numeric */
+    $minFileSize = preg_match('/^\d+$/', $minFileSize) ? $minFileSize : '0';
+
+    /* Clean up previous run */
+    if (file_exists($statusFile)) unlink($statusFile);
+    if (file_exists($logFile)) unlink($logFile);
+    
+    $script = '/usr/local/emhttp/plugins/dedupe/scripts/scan.sh';
+    $cmd = sprintf(
+        "nohup bash %s %s %s %s %s %s > /dev/null 2>&1 & echo $!",
+        escapeshellarg($script),
+        escapeshellarg($realTarget),
+        escapeshellarg($hashMethod),
+        escapeshellarg($deepVerify),
+        escapeshellarg($minFileSize),
+        escapeshellarg($excludePatterns)
+    );
+    exec($cmd, $output);
+    if (!empty($output[0])) {
+        file_put_contents($pidFile, trim($output[0]));
+    }
+    echo json_encode(['success' => true]);
+    exit;
+}
+
+/* --- Action: Delete selected files --- */
+if ($action === 'delete') {
+    $files = $_POST['files'] ?? [];
+    if (!is_array($files)) {
+        echo json_encode(['success' => false, 'error' => 'Invalid file list.']);
+        exit;
+    }
+    $count = 0;
+    $bytesReclaimed = 0;
+    $errors = [];
+    foreach ($files as $file) {
+        /* SECURITY: Resolve real path to prevent directory traversal attacks
+         * e.g., "/mnt/../etc/shadow" resolves to "/etc/shadow" which fails the check */
+        $realFile = realpath($file);
+        if ($realFile === false) {
+            $errors[] = "Not found: $file";
+            continue;
+        }
+        if (strpos($realFile, '/mnt/') !== 0) {
+            $errors[] = "Outside /mnt/: $file";
+            continue;
+        }
+        if (!is_file($realFile)) {
+            $errors[] = "Not a file: $file";
+            continue;
+        }
+        $size = filesize($realFile);
+        if (unlink($realFile)) {
+            $bytesReclaimed += $size;
+            $count++;
+        } else {
+            $errors[] = "Delete failed: $file";
+        }
+    }
+    $spaceStr = formatBytes($bytesReclaimed);
+    $msg = "\n[" . date('H:i:s') . "] Deleted $count files. Reclaimed $spaceStr of space.";
+    if (!empty($errors)) {
+        $msg .= "\n[" . date('H:i:s') . "] Errors: " . implode('; ', array_slice($errors, 0, 10));
+    }
+    file_put_contents($logFile, $msg, FILE_APPEND);
+    echo json_encode(['success' => true, 'deleted' => $count, 'space' => $spaceStr, 'errors' => $errors]);
+    exit;
+}
+
+/* --- Action: Return current status --- */
+if ($action === 'status') {
+    echo file_exists($statusFile) ? file_get_contents($statusFile) : json_encode(['status' => 'idle']);
+    exit;
+}
+
+/* --- Action: Clear results and logs --- */
+if ($action === 'clear') {
+    @unlink($statusFile);
+    @unlink($logFile);
+    echo json_encode(['success' => true]);
+    exit;
+}
+
+/* --- Action: Pause scan --- */
+if ($action === 'pause') {
+    $pid = getValidPid($pidFile);
+    if ($pid !== false) {
+        exec("pkill -STOP -P " . escapeshellarg($pid) . "; kill -STOP " . escapeshellarg($pid));
+        /* Write paused status atomically */
+        $tmpStatus = $statusFile . '.tmp';
+        file_put_contents($tmpStatus, json_encode(['status' => 'paused']));
+        rename($tmpStatus, $statusFile);
+        echo json_encode(['success' => true]);
+    } else {
+        echo json_encode(['success' => false, 'error' => 'No running scan found.']);
+    }
+    exit;
+}
+
+/* --- Action: Resume scan --- */
+if ($action === 'resume') {
+    $pid = getValidPid($pidFile);
+    if ($pid !== false) {
+        exec("pkill -CONT -P " . escapeshellarg($pid) . "; kill -CONT " . escapeshellarg($pid));
+        $tmpStatus = $statusFile . '.tmp';
+        file_put_contents($tmpStatus, json_encode(['status' => 'running', 'message' => 'Resuming...', 'progress' => 0]));
+        rename($tmpStatus, $statusFile);
+        echo json_encode(['success' => true]);
+    } else {
+        echo json_encode(['success' => false, 'error' => 'No paused scan found.']);
+    }
+    exit;
+}
+
+/* --- Action: Cancel scan --- */
+if ($action === 'cancel') {
+    $pid = getValidPid($pidFile);
+    if ($pid !== false) {
+        exec("pkill -TERM -P " . escapeshellarg($pid) . "; kill -TERM " . escapeshellarg($pid));
+    }
+    $tmpStatus = $statusFile . '.tmp';
+    file_put_contents($tmpStatus, json_encode(['status' => 'cancelled']));
+    rename($tmpStatus, $statusFile);
+    @unlink($pidFile);
+    echo json_encode(['success' => true]);
+    exit;
+}
+
+/* Unknown action */
+echo json_encode(['success' => false, 'error' => 'Unknown action.']);
+?>
+]]>
+</INLINE>
+</FILE>
+
+<!-- 4. SCAN SCRIPT — Background deduplication engine -->
+<FILE Name="/usr/local/emhttp/plugins/&name;/scripts/scan.sh" Mode="0755">
+<INLINE>
+<![CDATA[
+#!/bin/bash
+# Dedupe Scanner — Background scan script
+# Usage: scan.sh <target_path> <hash_command> <deep_verify> <min_file_size> <exclude_patterns>
+
+set -euo pipefail
+
+TARGET="$1"
+HASH_CMD="$2"
+DEEP_VERIFY="${3:-0}"
+MIN_SIZE="${4:-0}"
+EXCLUDE_PATTERNS="${5:-}"
+
+STATUS_FILE="/tmp/dedupe_status.json"
+LOG_FILE="/tmp/dedupe_scan.log"
+TMP_HASHES=$(mktemp /tmp/dedupe_hashes.XXXXXX)
+TMP_CANDIDATES=$(mktemp /tmp/dedupe_candidates.XXXXXX)
+
+# Cleanup on exit (normal or error)
+cleanup() {
+    rm -f "$TMP_HASHES" "$TMP_CANDIDATES"
+}
+trap cleanup EXIT
+
+# Atomic status update — write to temp file then rename to prevent corrupt reads
+update_status() {
+    local tmp="${STATUS_FILE}.tmp"
+    echo "{\"status\":\"running\",\"progress\":$1,\"message\":\"$2\"}" > "$tmp"
+    mv -f "$tmp" "$STATUS_FILE"
+}
+
+log_msg() {
+    echo "[$(date '+%H:%M:%S')] $1" >> "$LOG_FILE"
+}
+
+log_msg "=== Dedupe Scan Started ==="
+log_msg "Target: $TARGET"
+log_msg "Hash Method: $HASH_CMD"
+log_msg "Deep Verify: $([ "$DEEP_VERIFY" = "1" ] && echo "Enabled" || echo "Disabled")"
+log_msg "Min File Size: $MIN_SIZE bytes"
+log_msg "Exclude Patterns: ${EXCLUDE_PATTERNS:-none}"
+
+# --- Step 1: Find all files ---
+update_status 5 "Step 1/4: Finding files..."
+
+# Build find command with exclusions
+FIND_CMD="find \"$TARGET\" -type f"
+
+# Add minimum size filter
+if [ "$MIN_SIZE" -gt 0 ] 2>/dev/null; then
+    FIND_CMD="$FIND_CMD -size +${MIN_SIZE}c"
+fi
+
+# Add exclusion patterns
+if [ -n "$EXCLUDE_PATTERNS" ]; then
+    IFS=',' read -ra PATTERNS <<< "$EXCLUDE_PATTERNS"
+    for pattern in "${PATTERNS[@]}"; do
+        pattern=$(echo "$pattern" | xargs)  # trim whitespace
+        if [ -n "$pattern" ]; then
+            FIND_CMD="$FIND_CMD -not -path \"*/${pattern}/*\""
+        fi
+    done
+fi
+
+FIND_CMD="$FIND_CMD -printf \"%s\t%p\n\""
+
+TOTAL_FILES=$(eval "$FIND_CMD" 2>/dev/null | wc -l)
+log_msg "Found $TOTAL_FILES files total."
+
+if [ "$TOTAL_FILES" -eq 0 ]; then
+    log_msg "No files found in target directory. Scan complete."
+    tmp="${STATUS_FILE}.tmp"
+    echo '{"status":"complete","duplicates":[]}' > "$tmp"
+    mv -f "$tmp" "$STATUS_FILE"
+    exit 0
+fi
+
+# --- Step 2: Identify size-duplicate candidates ---
+update_status 15 "Step 2/4: Identifying size-duplicate candidates..."
+
+# Find files that share the same size (potential duplicates)
+eval "$FIND_CMD" 2>/dev/null | sort -n > "$TMP_CANDIDATES"
+POTENTIAL=$(awk -F'\t' '{count[$1]++} END{c=0; for(i in count) if(count[i]>1) c+=count[i]; print c}' "$TMP_CANDIDATES")
+
+log_msg "Found $POTENTIAL files with matching sizes (potential duplicates)."
+
+if [ -z "$POTENTIAL" ] || [ "$POTENTIAL" -eq 0 ] 2>/dev/null; then
+    log_msg "No size-duplicate candidates found. No duplicates possible. Scan complete."
+    tmp="${STATUS_FILE}.tmp"
+    echo '{"status":"complete","duplicates":[]}' > "$tmp"
+    mv -f "$tmp" "$STATUS_FILE"
+    exit 0
+fi
+
+# --- Step 3: Hash only the size-duplicate candidates ---
+update_status 30 "Step 3/4: Hashing $POTENTIAL candidates..."
+
+awk -F'\t' '{a[$1]=a[$1] ? a[$1]"\n"$2 : $2; count[$1]++} END{for(i in count) if(count[i]>1) print a[i]}' "$TMP_CANDIDATES" \
+    | tr '\n' '\0' \
+    | xargs -0 -n 10 "$HASH_CMD" 2>/dev/null \
+    | awk -v total="$POTENTIAL" -v sf="$STATUS_FILE" -v lf="$LOG_FILE" '
+{
+    print $0; count++
+    if (count % 50 == 0 || count == total) {
+        p = 30 + int((count * 50) / (total > 0 ? total : 1))
+        if (p > 80) p = 80
+        tmp = sf ".tmp"
+        printf "{\"status\":\"running\",\"progress\":%d,\"message\":\"Hashing %d/%d files...\"}", p, count, total > tmp
+        close(tmp)
+        system("mv -f " tmp " " sf)
+    }
+}' > "$TMP_HASHES"
+
+HASH_COUNT=$(wc -l < "$TMP_HASHES")
+log_msg "Hashed $HASH_COUNT files."
+
+# --- Step 4: Finalize report (and optional deep verification) ---
+update_status 85 "Step 4/4: Analyzing results..."
+
+/usr/bin/php -r '
+    $hashFile = $argv[1];
+    $statusFile = $argv[2];
+    $logFile = $argv[3];
+    $deepVerify = $argv[4];
+
+    $lines = file($hashFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    $hashes = [];
+    foreach ($lines as $l) {
+        if (preg_match("/^([a-f0-9]+)\s+(.+)$/", $l, $m)) {
+            $hashes[$m[1]][] = $m[2];
+        }
+    }
+
+    $dupes = [];
+    $totalWasted = 0;
+
+    foreach ($hashes as $h => $files) {
+        if (count($files) <= 1) continue;
+
+        if ($deepVerify === "1") {
+            /* Deep verification: group files that are byte-identical using cmp */
+            $verified = [];
+            $used = array_fill(0, count($files), false);
+
+            for ($i = 0; $i < count($files); $i++) {
+                if ($used[$i]) continue;
+                $group = [$files[$i]];
+                $used[$i] = true;
+
+                for ($j = $i + 1; $j < count($files); $j++) {
+                    if ($used[$j]) continue;
+                    $ret = 0;
+                    exec("cmp -s " . escapeshellarg($files[$i]) . " " . escapeshellarg($files[$j]), $out, $ret);
+                    if ($ret === 0) {
+                        $group[] = $files[$j];
+                        $used[$j] = true;
+                    }
+                }
+
+                if (count($group) > 1) {
+                    $size = @filesize($group[0]) ?: 0;
+                    $dupes[] = ["hash" => $h, "files" => $group, "size" => $size];
+                    $totalWasted += $size * (count($group) - 1);
+                }
+            }
+        } else {
+            $size = @filesize($files[0]) ?: 0;
+            $dupes[] = ["hash" => $h, "files" => $files, "size" => $size];
+            $totalWasted += $size * (count($files) - 1);
+        }
+    }
+
+    /* Write final status atomically */
+    $tmp = $statusFile . ".tmp";
+    file_put_contents($tmp, json_encode(["status" => "complete", "duplicates" => $dupes]));
+    rename($tmp, $statusFile);
+
+    /* Log summary */
+    $groupCount = count($dupes);
+    $fileCount = 0;
+    foreach ($dupes as $d) { $fileCount += count($d["files"]); }
+
+    $wastedStr = $totalWasted;
+    $units = ["B", "KB", "MB", "GB", "TB"];
+    $ui = 0;
+    $w = (float)$totalWasted;
+    while ($w >= 1024 && $ui < 4) { $w /= 1024; $ui++; }
+    $wastedStr = round($w, 2) . " " . $units[$ui];
+
+    $msg = "[" . date("H:i:s") . "] === Scan Complete ===\n";
+    $msg .= "[" . date("H:i:s") . "] Found $groupCount duplicate groups ($fileCount total files).\n";
+    $msg .= "[" . date("H:i:s") . "] Potential space savings: $wastedStr\n";
+    if ($deepVerify === "1") {
+        $msg .= "[" . date("H:i:s") . "] Deep verification was enabled — all matches are byte-verified.\n";
+    }
+    file_put_contents($logFile, $msg, FILE_APPEND);
+
+    /* Send Unraid notification */
+    $notifyMsg = "Found $groupCount duplicate groups. Potential savings: $wastedStr";
+    exec("/usr/local/emhttp/webGui/scripts/notify " .
+         "-e \"Dedupe\" " .
+         "-s \"Dedupe Scan Finished\" " .
+         "-d " . escapeshellarg($notifyMsg) . " " .
+         "-i normal");
+' "$TMP_HASHES" "$STATUS_FILE" "$LOG_FILE" "$DEEP_VERIFY"
+
+log_msg "Scanner process exiting."
+]]>
+</INLINE>
+</FILE>
+
+<!-- 5. UNINSTALLATION HOOK -->
+<FILE Run="/bin/bash" Method="remove">
+<INLINE>
+<![CDATA[
+echo "Removing dedupe plugin and cleaning up..."
+# Stop any running scan
+if [ -f /tmp/dedupe_scan.pid ]; then
+    PID=$(cat /tmp/dedupe_scan.pid)
+    if echo "$PID" | grep -qE '^[0-9]+$'; then
+        pkill -TERM -P "$PID" 2>/dev/null || true
+        kill -TERM "$PID" 2>/dev/null || true
+    fi
+fi
+# Remove the live plugin directory from emhttp RAM disk
+rm -rf /usr/local/emhttp/plugins/dedupe
+# Clean up temporary scan data
+rm -f /tmp/dedupe_status.json /tmp/dedupe_status.json.tmp
+rm -f /tmp/dedupe_scan.log /tmp/dedupe_scan.pid
+rm -f /tmp/dedupe_hashes.* /tmp/dedupe_candidates.*
+echo "Cleanup complete. Dedupe has been removed from the Utilities menu."
+]]>
+</INLINE>
+</FILE>
+
+</PLUGIN>
