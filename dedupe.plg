@@ -2,14 +2,15 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name "dedupe">
 <!ENTITY author "James Green">
-<!ENTITY version "2026.10.31b">
+<!ENTITY version "2026.10.31c">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/greenycq20/unraid-dedupe/main/dedupe.plg">
 ]>
 <PLUGIN name="&name;" author="&author;" version="&version;" pluginURL="&pluginURL;" min="6.9.0" icon="clone">
 
 <CHANGES>
-###2026.10.31b
-- Restored clean baseline execution engine to ensure progress bar and live logging run smoothly.
+###2026.10.31c
+- FIX: Set Content-Type: text/plain for logs endpoint so live log updates display properly in the UI.
+- IMPROVEMENT: Enhanced logging output with file counts and space statistics.
 </CHANGES>
 
 <DESCRIPTION>
@@ -129,7 +130,11 @@ if (is_dir($userSharesPath)) {
 <script>
     let pollInterval, logInterval;
 
-    function toggleLogs() { $('#logBox').slideToggle(); }
+    function toggleLogs() {
+        $('#logBox').slideToggle(200, function() {
+            if ($(this).is(':visible')) fetchLogs();
+        });
+    }
     
     function formatBytes(bytes, decimals = 2) {
         if (!+bytes) return '0 Bytes';
@@ -160,7 +165,7 @@ if (is_dir($userSharesPath)) {
         $('#progressContainer').show();
         $('#progressBar').css('width', '0%');
         $('#progressText').text('0%');
-        $('#logBox').val('Scan started...\n');
+        $('#logBox').val('Scan initiated...\n');
 
         if(logInterval) clearInterval(logInterval);
         logInterval = setInterval(fetchLogs, 1000);
@@ -170,6 +175,7 @@ if (is_dir($userSharesPath)) {
         }, function(res) {
             if(pollInterval) clearInterval(pollInterval);
             pollInterval = setInterval(checkStatus, 1000);
+            fetchLogs();
         }).fail(function(xhr) {
             alert('Scan request failed: ' + xhr.statusText);
             resetButtons();
@@ -184,8 +190,10 @@ if (is_dir($userSharesPath)) {
     function fetchLogs() {
         $.post('/plugins/dedupe/api.php', { action: 'logs' }, function(res) {
             const lb = $('#logBox');
-            if(res && lb.val() !== res) { lb.val(res).scrollTop(lb[0].scrollHeight); }
-        });
+            if (res && lb.val() !== res) {
+                lb.val(res).scrollTop(lb[0].scrollHeight);
+            }
+        }, 'text');
     }
 
     function checkStatus() {
@@ -255,8 +263,6 @@ if (is_dir($userSharesPath)) {
 <INLINE>
 <![CDATA[
 <?php
-header('Content-Type: application/json; charset=utf-8');
-
 $action = $_POST['action'] ?? '';
 $statusFile = '/tmp/dedupe_status.json';
 $logFile = '/tmp/dedupe_scan.log';
@@ -270,9 +276,12 @@ function formatBytes($bytes) {
 }
 
 if ($action === 'logs') {
-    echo file_exists($logFile) ? file_get_contents($logFile) : "";
+    header('Content-Type: text/plain; charset=utf-8');
+    echo file_exists($logFile) ? file_get_contents($logFile) : "No log file found.";
     exit;
 }
+
+header('Content-Type: application/json; charset=utf-8');
 
 if ($action === 'scan') {
     $target = $_POST['target'] ?? '';
@@ -414,8 +423,21 @@ update_status 90 "Step 3: Finalizing report..."
     file_put_contents($argv[2], json_encode(["status"=>"complete", "duplicates"=>$dupes]));
     
     $count = count($dupes);
-    @exec("/usr/local/emhttp/webGui/scripts/notify -e \"Dedupe\" -i \"normal\" -s \"Dedupe Scan Finished\" -d \"Found $count duplicate groups.\"");
-' "$TMP_HASHES" "$STATUS_FILE"
+    $totalSaved = 0;
+    foreach($dupes as $d) {
+        $totalSaved += $d["size"] * (count($d["files"]) - 1);
+    }
+    $units = ["B", "KB", "MB", "GB", "TB"];
+    $ui = 0;
+    $w = (float)$totalSaved;
+    while ($w >= 1024 && $ui < 4) { $w /= 1024; $ui++; }
+    $wastedStr = round($w, 2) . " " . $units[$ui];
+
+    $logSummary = "[" . date("H:i:s") . "] Found " . $count . " duplicate groups. Potential space reclaimable: " . $wastedStr . "\n";
+    file_put_contents($argv[3], $logSummary, FILE_APPEND);
+
+    @exec("/usr/local/emhttp/webGui/scripts/notify -e \"Dedupe\" -i \"normal\" -s \"Dedupe Scan Finished\" -d \"Found $count duplicate groups. Potential savings: $wastedStr\"");
+' "$TMP_HASHES" "$STATUS_FILE" "$LOG_FILE"
 
 echo "[$(date '+%H:%M:%S')] Scan complete!" >> "$LOG_FILE"
 rm -f "$TMP_HASHES"
